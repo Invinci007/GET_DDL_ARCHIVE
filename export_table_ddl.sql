@@ -15,8 +15,13 @@ CREATE OR REPLACE PROCEDURE export_table_ddl (
     v_const_filename    VARCHAR2(200);
     v_ref_const_filename VARCHAR2(200);
 
+    v_table_found       BOOLEAN := FALSE;
+
     e_object_not_found  EXCEPTION;
     PRAGMA EXCEPTION_INIT(e_object_not_found, -31608);
+
+    e_table_not_found   EXCEPTION;
+    PRAGMA EXCEPTION_INIT(e_table_not_found, -31603);
 
     -- Helper procedure to write CLOB to file
     PROCEDURE write_clob_to_file(p_dir IN VARCHAR2, p_filename IN VARCHAR2, p_clob IN CLOB) IS
@@ -97,28 +102,33 @@ BEGIN
     BEGIN
         v_table_ddl := DBMS_METADATA.GET_DDL('TABLE', p_table_name, p_schema_name);
         write_clob_to_file(v_actual_dir_name, v_table_filename, v_table_ddl);
+        v_table_found := TRUE;
     EXCEPTION
-        WHEN e_object_not_found THEN
+        WHEN e_table_not_found OR e_object_not_found THEN
             write_to_log(v_actual_dir_name, v_log_filename, 'Table ' || p_schema_name || '.' || p_table_name || ' not found.');
+            v_table_found := FALSE;
     END;
 
-    -- 2. Extract and write CONSTRAINT DDL
-    BEGIN
-        v_constraint_ddl := DBMS_METADATA.GET_DEPENDENT_DDL('CONSTRAINT', p_table_name, p_schema_name);
-        write_clob_to_file(v_actual_dir_name, v_const_filename, v_constraint_ddl);
-    EXCEPTION
-        WHEN e_object_not_found THEN
-            write_to_log(v_actual_dir_name, v_log_filename, 'No basic constraints found for ' || p_schema_name || '.' || p_table_name || '.');
-    END;
+    -- Only attempt to extract constraints if the table itself exists
+    IF v_table_found THEN
+        -- 2. Extract and write CONSTRAINT DDL
+        BEGIN
+            v_constraint_ddl := DBMS_METADATA.GET_DEPENDENT_DDL('CONSTRAINT', p_table_name, p_schema_name);
+            write_clob_to_file(v_actual_dir_name, v_const_filename, v_constraint_ddl);
+        EXCEPTION
+            WHEN e_object_not_found THEN
+                write_to_log(v_actual_dir_name, v_log_filename, 'No basic constraints found for ' || p_schema_name || '.' || p_table_name || '.');
+        END;
 
-    -- 3. Extract and write REF_CONSTRAINT DDL
-    BEGIN
-        v_ref_constraint_ddl := DBMS_METADATA.GET_DEPENDENT_DDL('REF_CONSTRAINT', p_table_name, p_schema_name);
-        write_clob_to_file(v_actual_dir_name, v_ref_const_filename, v_ref_constraint_ddl);
-    EXCEPTION
-        WHEN e_object_not_found THEN
-            write_to_log(v_actual_dir_name, v_log_filename, 'No referential constraints found for ' || p_schema_name || '.' || p_table_name || '.');
-    END;
+        -- 3. Extract and write REF_CONSTRAINT DDL
+        BEGIN
+            v_ref_constraint_ddl := DBMS_METADATA.GET_DEPENDENT_DDL('REF_CONSTRAINT', p_table_name, p_schema_name);
+            write_clob_to_file(v_actual_dir_name, v_ref_const_filename, v_ref_constraint_ddl);
+        EXCEPTION
+            WHEN e_object_not_found THEN
+                write_to_log(v_actual_dir_name, v_log_filename, 'No referential constraints found for ' || p_schema_name || '.' || p_table_name || '.');
+        END;
+    END IF;
 
     -- Reset metadata transform parameters (Enable)
     DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'CONSTRAINTS', TRUE);
@@ -133,6 +143,15 @@ EXCEPTION
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'REF_CONSTRAINTS', TRUE);
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', TRUE);
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', TRUE);
-        RAISE;
+
+        -- Log the unexpected error so we don't fail silently
+        BEGIN
+            write_to_log(v_actual_dir_name, v_log_filename, 'Unexpected error occurred: ' || SQLERRM);
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL; -- If logging fails, just continue and let the error raise
+        END;
+        -- We do not RAISE here since the user requested:
+        -- "if the table or any other object are presnt write it to log file instead of failing the procedure"
 END export_table_ddl;
 /
